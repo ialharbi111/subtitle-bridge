@@ -46,6 +46,14 @@ function allowedLanguage(code) {
   return LANGUAGES.includes(language(code));
 }
 
+// Stremio expects ISO 639-2/3 language identifiers in subtitle responses.
+// Keep the short codes in configuration, but always return the canonical code.
+function stremioLanguage(code) {
+  const value = language(code);
+  const map = { AR: "ara", EN: "eng", FR: "fra", ES: "spa", PT: "por" };
+  return map[value] || String(code || "und").toLowerCase();
+}
+
 function safeText(value) {
   return String(value || "").slice(0, 180).replace(/[\r\n]+/g, " ");
 }
@@ -86,7 +94,7 @@ async function openSubtitles(type, id, query) {
     .map((item, index) => ({
       id: `os-${item.id || index}`,
       url: item.url,
-      lang: language(item.lang),
+      lang: stremioLanguage(item.lang),
       source: "OpenSubtitles",
       release: item.id || "",
       score: releaseScore(item.id, query.get("filename"), "OpenSubtitles")
@@ -120,7 +128,7 @@ async function subdl(type, id, query) {
       output.push({
         id: `subdl-${file.file_n_id || file.md5 || output.length}`,
         url,
-        lang: language(file.language),
+        lang: stremioLanguage(file.language),
         source: "SubDL",
         release,
         score: releaseScore(release, query.get("filename"), "SubDL") - (file.hi ? 10 : 0)
@@ -164,7 +172,11 @@ const server = http.createServer(async (request, response) => {
       return json(response, 200, { subtitles: [] });
     }
   }
-  if (requestUrl.pathname === "/health") return json(response, 200, { ok: true, providers: { openSubtitles: ENABLE_OPEN_SUBTITLES, subdl: ENABLE_SUBDL } });
+  if (requestUrl.pathname === "/health") return json(response, 200, {
+    ok: true,
+    languages: LANGUAGES,
+    providers: { openSubtitles: ENABLE_OPEN_SUBTITLES, subdl: ENABLE_SUBDL }
+  });
   response.writeHead(302, { Location: "/manifest.json" });
   response.end();
 });
