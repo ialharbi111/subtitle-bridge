@@ -13,7 +13,7 @@ const HIDE_HI = process.env.HIDE_HI === "true";
 
 const manifest = {
   id: "com.personal.subtitlebridge.arabic",
-  version: "1.0.2",
+  version: "1.0.3",
   name: "Subtitle Bridge Arabic",
   description: "ترجمات من مصادر موثوقة — بدون ذكاء اصطناعي",
   resources: [{ name: "subtitles", types: ["movie", "series"], idPrefixes: ["tt"] }],
@@ -95,6 +95,7 @@ async function openSubtitles(type, id, query) {
       id: `os-${item.id || index}`,
       url: item.url,
       lang: stremioLanguage(item.lang),
+      langRaw: item.lang,
       source: "OpenSubtitles",
       release: item.id || "",
       score: releaseScore(item.id, query.get("filename"), "OpenSubtitles")
@@ -129,6 +130,7 @@ async function subdl(type, id, query) {
         id: `subdl-${file.file_n_id || file.md5 || output.length}`,
         url,
         lang: stremioLanguage(file.language),
+        langRaw: file.language,
         source: "SubDL",
         release,
         score: releaseScore(release, query.get("filename"), "SubDL") - (file.hi ? 10 : 0)
@@ -142,7 +144,14 @@ function dedupeAndFormat(items) {
   const seen = new Set();
   return items
     .filter((item) => item.url && !seen.has(item.url) && seen.add(item.url))
-    .sort((a, b) => b.score - a.score || a.lang.localeCompare(b.lang))
+    .sort((a, b) => {
+      // أولوية أولى: ترتيب اللغة كما هو محدد في LANGUAGES (مثلاً AR قبل EN)
+      const aPriority = LANGUAGES.indexOf(language(a.langRaw));
+      const bPriority = LANGUAGES.indexOf(language(b.langRaw));
+      if (aPriority !== bPriority) return aPriority - bPriority;
+      // أولوية ثانية: جودة تطابق الملف (score)
+      return b.score - a.score || a.lang.localeCompare(b.lang);
+    })
     .slice(0, 80)
     .map((item) => ({
       id: item.id,
