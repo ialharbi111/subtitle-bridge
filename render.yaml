@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: subtitle-bridge
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: SUBTITLE_LANGUAGES
+        value: AR,EN
+      - key: ENABLE_OPEN_SUBTITLES
+        value: "true"
+      - key: ENABLE_SUBDL
+        value: "true"
+      - key: HIDE_HI
+        value: "true"
+      - key: SUBDL_API_KEY
+        sync: false
