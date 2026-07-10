@@ -12,9 +12,9 @@ const ENABLE_SUBDL = Boolean(SUBDL_API_KEY) && process.env.ENABLE_SUBDL !== "fal
 const HIDE_HI = process.env.HIDE_HI === "true";
 
 const manifest = {
-  id: "com.personal.subtitlebridge",
-  version: "1.0.0",
-  name: "Subtitle Bridge",
+  id: "com.personal.subtitlebridge.arabic",
+  version: "1.0.2",
+  name: "Subtitle Bridge Arabic",
   description: "ترجمات من مصادر موثوقة — بدون ذكاء اصطناعي",
   resources: [{ name: "subtitles", types: ["movie", "series"], idPrefixes: ["tt"] }],
   types: ["movie", "series"],
@@ -25,7 +25,7 @@ const manifest = {
 function json(response, status, data) {
   response.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
-    "Cache-Control": "public, max-age=300",
+    "Cache-Control": "no-store",
     "Access-Control-Allow-Origin": "*"
   });
   response.end(JSON.stringify(data));
