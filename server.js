@@ -23,7 +23,7 @@ function baseManifest(languages) {
   const label = languages.join("+");
   return {
     id: `com.personal.subtitlebridge.${label.toLowerCase()}`,
-    version: "2.0.0",
+    version: "2.1.0",
     name: `Subtitle Bridge (${label})`,
     description: `ترجمات من OpenSubtitles وSubDL — لغات: ${label}`,
     resources: ["subtitles"],
@@ -82,6 +82,21 @@ function decodeConfig(segment) {
   return null;
 }
 
+// Stremio's real clients append video info (filename/videoSize/videoHash) as an extra
+// PATH segment before ".json" -- e.g. /subtitles/movie/tt123/filename=X.mp4.json
+// (not as a "?query=string"). We must parse it from there, with a query-string fallback
+// for the older format / manual testing.
+function parseExtra(segment, searchParams) {
+  const merged = new URLSearchParams();
+  if (segment) {
+    let decoded = segment;
+    try { decoded = decodeURIComponent(segment); } catch (error) { /* keep raw */ }
+    for (const [key, value] of new URLSearchParams(decoded)) merged.set(key, value);
+  }
+  for (const [key, value] of searchParams) merged.set(key, value);
+  return merged;
+}
+
 function releaseScore(releaseName, filename, source) {
   const release = String(releaseName || "").toLowerCase();
   const file = String(filename || "").toLowerCase();
@@ -108,10 +123,10 @@ async function fetchJson(url, options = {}) {
   }
 }
 
-async function openSubtitles(type, id, query, languages) {
+async function openSubtitles(type, id, extra, languages) {
   if (!ENABLE_OPEN_SUBTITLES) return [];
   const upstream = new URL(`https://opensubtitles-v3.strem.io/subtitles/${encodeURIComponent(type)}/${encodeURIComponent(id)}.json`);
-  for (const [key, value] of query) upstream.searchParams.set(key, value);
+  for (const [key, value] of extra) upstream.searchParams.set(key, value);
   const data = await fetchJson(upstream);
   return (data.subtitles || [])
     .filter((item) => languages.includes(language(item.lang)))
@@ -122,11 +137,11 @@ async function openSubtitles(type, id, query, languages) {
       langRaw: item.lang,
       source: "OpenSubtitles",
       release: item.id || "",
-      score: releaseScore(item.id, query.get("filename"), "OpenSubtitles")
+      score: releaseScore(item.id, extra.get("filename"), "OpenSubtitles")
     }));
 }
 
-async function subdl(type, id, query, languages) {
+async function subdl(type, id, extra, languages) {
   if (!ENABLE_SUBDL) return [];
   const video = parseVideoId(id);
   if (!video) return [];
@@ -157,7 +172,7 @@ async function subdl(type, id, query, languages) {
         langRaw: file.language,
         source: "SubDL",
         release,
-        score: releaseScore(release, query.get("filename"), "SubDL") - (file.hi ? 10 : 0)
+        score: releaseScore(release, extra.get("filename"), "SubDL") - (file.hi ? 10 : 0)
       });
     }
   }
@@ -183,10 +198,13 @@ function dedupeAndFormat(items, languages) {
     }));
 }
 
-async function handleSubtitles(type, id, query, languages) {
-  const providers = [openSubtitles(type, id, query, languages), subdl(type, id, query, languages)];
+async function handleSubtitles(type, id, extra, languages) {
+  const providers = [openSubtitles(type, id, extra, languages), subdl(type, id, extra, languages)];
   const settled = await Promise.allSettled(providers);
   const items = settled.flatMap((result) => result.status === "fulfilled" ? result.value : []);
+  if (settled.some((result) => result.status === "rejected")) {
+    console.error("provider failed", settled.filter((r) => r.status === "rejected").map((r) => r.reason && r.reason.message));
+  }
   return { subtitles: dedupeAndFormat(items, languages) };
 }
 
@@ -257,12 +275,15 @@ const server = http.createServer(async (request, response) => {
     return json(response, 200, baseManifest(languages));
   }
 
-  // /subtitles/movie/tt123.json  OR  /:config/subtitles/movie/tt123.json
-  const subsMatch = requestUrl.pathname.match(/^\/(?:([^/]+)\/)?subtitles\/(movie|series)\/([^/]+)\.json$/);
+  // /subtitles/movie/tt123.json
+  // /subtitles/movie/tt123/videoSize=123&filename=x.mp4.json   <- real Stremio client format
+  // /:config/subtitles/movie/tt123[/extra].json
+  const subsMatch = requestUrl.pathname.match(/^\/(?:([^/]+)\/)?subtitles\/(movie|series)\/([^/]+?)(?:\/([^/]+))?\.json$/);
   if (subsMatch) {
     const languages = decodeConfig(subsMatch[1]) || DEFAULT_LANGUAGES;
+    const extra = parseExtra(subsMatch[4], requestUrl.searchParams);
     try {
-      return json(response, 200, await handleSubtitles(subsMatch[2], decodeURIComponent(subsMatch[3]), requestUrl.searchParams, languages));
+      return json(response, 200, await handleSubtitles(subsMatch[2], decodeURIComponent(subsMatch[3]), extra, languages));
     } catch (error) {
       console.error("subtitle request failed", error.message);
       return json(response, 200, { subtitles: [] });
