@@ -5,22 +5,34 @@ const { URL } = require("node:url");
 
 const PORT = Number(process.env.PORT || 7000);
 const SUBDL_API_KEY = process.env.SUBDL_API_KEY || "";
-const LANGUAGES = (process.env.SUBTITLE_LANGUAGES || "AR,EN")
+const DEFAULT_LANGUAGES = (process.env.SUBTITLE_LANGUAGES || "AR")
   .split(",").map((value) => value.trim().toUpperCase()).filter(Boolean);
 const ENABLE_OPEN_SUBTITLES = process.env.ENABLE_OPEN_SUBTITLES !== "false";
 const ENABLE_SUBDL = Boolean(SUBDL_API_KEY) && process.env.ENABLE_SUBDL !== "false";
 const HIDE_HI = process.env.HIDE_HI === "true";
 
-const manifest = {
-  id: "com.personal.subtitlebridge.arabic",
-  version: "1.0.3",
-  name: "Subtitle Bridge Arabic",
-  description: "ترجمات من مصادر موثوقة — بدون ذكاء اصطناعي",
-  resources: [{ name: "subtitles", types: ["movie", "series"], idPrefixes: ["tt"] }],
-  types: ["movie", "series"],
-  idPrefixes: ["tt"],
-  behaviorHints: { configurable: false }
-};
+const LANGUAGE_OPTIONS = [
+  { code: "AR", label: "العربية / Arabic" },
+  { code: "EN", label: "English" },
+  { code: "FR", label: "Français" },
+  { code: "ES", label: "Español" },
+  { code: "PT", label: "Português" }
+];
+
+function baseManifest(languages) {
+  const label = languages.join("+");
+  return {
+    id: `com.personal.subtitlebridge.${label.toLowerCase()}`,
+    version: "2.0.0",
+    name: `Subtitle Bridge (${label})`,
+    description: `ترجمات من OpenSubtitles وSubDL — لغات: ${label}`,
+    resources: ["subtitles"],
+    types: ["movie", "series"],
+    idPrefixes: ["tt"],
+    catalogs: [],
+    behaviorHints: { configurable: true, configurationRequired: false }
+  };
+}
 
 function json(response, status, data) {
   response.writeHead(status, {
@@ -29,6 +41,11 @@ function json(response, status, data) {
     "Access-Control-Allow-Origin": "*"
   });
   response.end(JSON.stringify(data));
+}
+
+function html(response, status, body) {
+  response.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
+  response.end(body);
 }
 
 function parseVideoId(id) {
@@ -42,12 +59,6 @@ function language(code) {
   return map[value] || value;
 }
 
-function allowedLanguage(code) {
-  return LANGUAGES.includes(language(code));
-}
-
-// Stremio expects ISO 639-2/3 language identifiers in subtitle responses.
-// Keep the short codes in configuration, but always return the canonical code.
 function stremioLanguage(code) {
   const value = language(code);
   const map = { AR: "ara", EN: "eng", FR: "fra", ES: "spa", PT: "por" };
@@ -56,6 +67,19 @@ function stremioLanguage(code) {
 
 function safeText(value) {
   return String(value || "").slice(0, 180).replace(/[\r\n]+/g, " ");
+}
+
+// --- config encoding: base64url JSON in the URL path, e.g. /eyJsYW5n.../manifest.json ---
+function decodeConfig(segment) {
+  try {
+    const data = JSON.parse(Buffer.from(segment, "base64url").toString("utf8"));
+    if (Array.isArray(data.languages) && data.languages.length) {
+      return data.languages.map((value) => String(value).trim().toUpperCase()).filter(Boolean);
+    }
+  } catch (error) {
+    // fall through
+  }
+  return null;
 }
 
 function releaseScore(releaseName, filename, source) {
@@ -84,13 +108,13 @@ async function fetchJson(url, options = {}) {
   }
 }
 
-async function openSubtitles(type, id, query) {
+async function openSubtitles(type, id, query, languages) {
   if (!ENABLE_OPEN_SUBTITLES) return [];
   const upstream = new URL(`https://opensubtitles-v3.strem.io/subtitles/${encodeURIComponent(type)}/${encodeURIComponent(id)}.json`);
   for (const [key, value] of query) upstream.searchParams.set(key, value);
   const data = await fetchJson(upstream);
   return (data.subtitles || [])
-    .filter((item) => allowedLanguage(item.lang))
+    .filter((item) => languages.includes(language(item.lang)))
     .map((item, index) => ({
       id: `os-${item.id || index}`,
       url: item.url,
@@ -102,7 +126,7 @@ async function openSubtitles(type, id, query) {
     }));
 }
 
-async function subdl(type, id, query) {
+async function subdl(type, id, query, languages) {
   if (!ENABLE_SUBDL) return [];
   const video = parseVideoId(id);
   if (!video) return [];
@@ -110,7 +134,7 @@ async function subdl(type, id, query) {
   upstream.searchParams.set("api_key", SUBDL_API_KEY);
   upstream.searchParams.set("imdb_id", video.imdbId);
   upstream.searchParams.set("type", type === "series" ? "tv" : "movie");
-  upstream.searchParams.set("languages", LANGUAGES.join(","));
+  upstream.searchParams.set("languages", languages.join(","));
   upstream.searchParams.set("subs_per_page", "30");
   upstream.searchParams.set("unpack", "1");
   upstream.searchParams.set("releases", "1");
@@ -122,7 +146,7 @@ async function subdl(type, id, query) {
   const output = [];
   for (const subtitle of data.subtitles || []) {
     for (const file of subtitle.unpack_files || []) {
-      if (!file.url || !allowedLanguage(file.language) || (HIDE_HI && file.hi)) continue;
+      if (!file.url || !languages.includes(language(file.language)) || (HIDE_HI && file.hi)) continue;
       if (video.episode && file.episode && Number(file.episode) !== Number(video.episode)) continue;
       const url = file.url.startsWith("http") ? file.url : `https://dl.subdl.com${file.url}`;
       const release = file.release_name || subtitle.release_name || file.name;
@@ -140,16 +164,14 @@ async function subdl(type, id, query) {
   return output;
 }
 
-function dedupeAndFormat(items) {
+function dedupeAndFormat(items, languages) {
   const seen = new Set();
   return items
     .filter((item) => item.url && !seen.has(item.url) && seen.add(item.url))
     .sort((a, b) => {
-      // أولوية أولى: ترتيب اللغة كما هو محدد في LANGUAGES (مثلاً AR قبل EN)
-      const aPriority = LANGUAGES.indexOf(language(a.langRaw));
-      const bPriority = LANGUAGES.indexOf(language(b.langRaw));
+      const aPriority = languages.indexOf(language(a.langRaw));
+      const bPriority = languages.indexOf(language(b.langRaw));
       if (aPriority !== bPriority) return aPriority - bPriority;
-      // أولوية ثانية: جودة تطابق الملف (score)
       return b.score - a.score || a.lang.localeCompare(b.lang);
     })
     .slice(0, 80)
@@ -161,32 +183,99 @@ function dedupeAndFormat(items) {
     }));
 }
 
-async function handleSubtitles(type, id, query) {
-  const providers = [openSubtitles(type, id, query), subdl(type, id, query)];
+async function handleSubtitles(type, id, query, languages) {
+  const providers = [openSubtitles(type, id, query, languages), subdl(type, id, query, languages)];
   const settled = await Promise.allSettled(providers);
   const items = settled.flatMap((result) => result.status === "fulfilled" ? result.value : []);
-  return { subtitles: dedupeAndFormat(items) };
+  return { subtitles: dedupeAndFormat(items, languages) };
+}
+
+function configurePage(host) {
+  const checkboxes = LANGUAGE_OPTIONS.map((option) => `
+    <label class="row">
+      <input type="checkbox" name="lang" value="${option.code}" ${option.code === "AR" ? "checked" : ""}>
+      <span>${option.label}</span>
+    </label>`).join("");
+
+  return `<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<title>إعداد Subtitle Bridge</title>
+<style>
+  body { font-family: system-ui, sans-serif; background:#0f0f14; color:#eee; max-width:480px; margin:40px auto; padding:0 16px; }
+  h1 { font-size:20px; }
+  .row { display:flex; align-items:center; gap:10px; padding:10px 0; border-bottom:1px solid #292933; font-size:16px; }
+  input[type=checkbox] { width:20px; height:20px; }
+  button { margin-top:20px; width:100%; padding:14px; font-size:16px; border:none; border-radius:8px; background:#7c5cff; color:#fff; cursor:pointer; }
+  #result { margin-top:20px; word-break:break-all; display:none; }
+  #result a { color:#7c5cff; }
+  #manifestUrl { font-size:13px; color:#aaa; background:#1a1a22; padding:10px; border-radius:6px; display:block; margin-top:8px; }
+</style>
+</head>
+<body>
+  <h1>اختر لغة (لغات) الترجمة</h1>
+  <p>حدد اللغة اللي تبيها، وضغط "توليد رابط التثبيت". الإضافة راح ترجع لك بس اللغات اللي تختارها هنا — بدون أي لبس.</p>
+  <form id="form">${checkboxes}
+    <button type="submit">توليد رابط التثبيت</button>
+  </form>
+  <div id="result">
+    <p>اضغط الزر عشان تثبت مباشرة بستريميو:</p>
+    <a id="installLink" href="#">📥 تثبيت في Stremio</a>
+    <span id="manifestUrl"></span>
+  </div>
+<script>
+  const host = ${JSON.stringify(host)};
+  document.getElementById("form").addEventListener("submit", function (event) {
+    event.preventDefault();
+    const langs = Array.from(document.querySelectorAll('input[name="lang"]:checked')).map(el => el.value);
+    if (!langs.length) { alert("اختر لغة وحدة على الأقل"); return; }
+    const config = btoa(JSON.stringify({ languages: langs })).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+    const manifestUrl = "https://" + host + "/" + config + "/manifest.json";
+    const installUrl = "stremio://" + host + "/" + config + "/manifest.json";
+    document.getElementById("installLink").href = installUrl;
+    document.getElementById("manifestUrl").textContent = manifestUrl;
+    document.getElementById("result").style.display = "block";
+  });
+</script>
+</body>
+</html>`;
 }
 
 const server = http.createServer(async (request, response) => {
   const requestUrl = new URL(request.url, `http://${request.headers.host || "localhost"}`);
   if (request.method !== "GET") return json(response, 405, { error: "GET only" });
-  if (requestUrl.pathname === "/manifest.json") return json(response, 200, manifest);
-  const match = requestUrl.pathname.match(/^\/subtitles\/(movie|series)\/([^/]+)\.json$/);
-  if (match) {
+
+  if (requestUrl.pathname === "/configure" || requestUrl.pathname === "/") {
+    return html(response, 200, configurePage(request.headers.host || `localhost:${PORT}`));
+  }
+
+  // /manifest.json  OR  /:config/manifest.json
+  const manifestMatch = requestUrl.pathname.match(/^\/(?:([^/]+)\/)?manifest\.json$/);
+  if (manifestMatch) {
+    const languages = decodeConfig(manifestMatch[1]) || DEFAULT_LANGUAGES;
+    return json(response, 200, baseManifest(languages));
+  }
+
+  // /subtitles/movie/tt123.json  OR  /:config/subtitles/movie/tt123.json
+  const subsMatch = requestUrl.pathname.match(/^\/(?:([^/]+)\/)?subtitles\/(movie|series)\/([^/]+)\.json$/);
+  if (subsMatch) {
+    const languages = decodeConfig(subsMatch[1]) || DEFAULT_LANGUAGES;
     try {
-      return json(response, 200, await handleSubtitles(match[1], decodeURIComponent(match[2]), requestUrl.searchParams));
+      return json(response, 200, await handleSubtitles(subsMatch[2], decodeURIComponent(subsMatch[3]), requestUrl.searchParams, languages));
     } catch (error) {
       console.error("subtitle request failed", error.message);
       return json(response, 200, { subtitles: [] });
     }
   }
+
   if (requestUrl.pathname === "/health") return json(response, 200, {
     ok: true,
-    languages: LANGUAGES,
+    defaultLanguages: DEFAULT_LANGUAGES,
     providers: { openSubtitles: ENABLE_OPEN_SUBTITLES, subdl: ENABLE_SUBDL }
   });
-  response.writeHead(302, { Location: "/manifest.json" });
+
+  response.writeHead(302, { Location: "/configure" });
   response.end();
 });
 
